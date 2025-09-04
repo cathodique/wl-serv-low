@@ -27,7 +27,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@cathodique/usocket": "file:../usocket",
+    "@cathodique/usocket": "^1.0.6",
     "fast-fifo": "^1.3.2",
     "xml-parser": "^1.2.1"
   }

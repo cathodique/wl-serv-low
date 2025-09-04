@@ -1,6 +1,6 @@
 import { endianness as getEndianness } from "node:os";
 import type { Compositor } from "./compositor.js";
-import { interfaces, WlArg, WlMessage } from "./wayland_interpreter.js";
+// import { interfaces, WlArg, WlMessage } from "./wayland_interpreter.js";
 
 import { USocket } from "@cathodique/usocket";
 
@@ -9,6 +9,15 @@ import { snakePrepend, snakeToCamel } from "./utils.js";
 
 import { console } from "./logger.js";
 import { EventEmitter } from "node:stream";
+import { interfaces, WlArg, WlMessage } from "./wayland_interpreter.js";
+
+interface ParsingContext<V> {
+  buf: Buffer;
+  idx: number;
+  fdQ: FIFO<number>;
+  callbacks: ((args: Record<string, any>) => void)[];
+  parent: V;
+}
 
 export const endianness = getEndianness();
 export const read = (b: Buffer, i: number, signed: boolean = false) => {
@@ -20,41 +29,28 @@ const write = (v: number, b: Buffer, i: number, signed: boolean = false) => {
   return b[`write${unsignedness}Int32${endianness}`](v, i);
 };
 
-export function parseOnReadable(
+export async function *parseOnReadable(
   sock: USocket,
-  callback: ({ data, fds }: { data: Buffer; fds: number[] }) => void,
 ) {
-  try {
-    while (true) {
-      const { data: headerStuff, fds: fds1 } = sock.read(8, null) || {
-        data: null,
-        fds: null,
-      };
-      if (!headerStuff) return;
-      const metadataNumber = read(headerStuff, 4);
-      const size = metadataNumber >> 16;
+  while (true) {
+    const { data: headerStuff, fds: fds1 } = sock.read(8, null) || {
+      data: null,
+      fds: null,
+    };
+    if (!headerStuff) return;
+    const metadataNumber = read(headerStuff, 4);
+    const size = metadataNumber >> 16;
 
-      const { data: payload, fds: fds2 } = sock.read(size - 8, null) || {
-        data: null,
-        fds: null,
-      };
+    const { data: payload, fds: fds2 } = sock.read(size - 8, null) || {
+      data: null,
+      fds: null,
+    };
 
-      const data = Buffer.concat([headerStuff, payload || Buffer.from([])]);
+    const data = Buffer.concat([headerStuff, payload || Buffer.from([])]);
 
-      const fds = [...(fds1 || []), ...(fds2 || [])];
-      callback({ data, fds });
-    }
-  } catch (err) {
-    console.error(err);
+    const fds = [...(fds1 || []), ...(fds2 || [])];
+    yield { data, fds };
   }
-}
-
-interface ParsingContext<V> {
-  buf: Buffer;
-  idx: number;
-  fdQ: FIFO<number>;
-  callbacks: ((args: Record<string, any>) => void)[];
-  parent: V;
 }
 
 export interface ConnectionParams<V extends ObjectReference, U extends Connection<V>> {
@@ -79,6 +75,10 @@ export class ObjectReference<T extends Record<string, any[]> | [never] = Record<
 
   get version(): number {
     return this._version ?? this.parent.version;
+  }
+
+  toJSON() {
+    return `${this.iface}#${this.oid}`;
   }
 }
 
@@ -108,24 +108,30 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
 
     this.fdQ = new FIFO();
 
-    // Handle data from the client
-    sock.on("readable", async function (this: Connection<V>) {
-      parseOnReadable(sock, function (this: Connection<V>, { data, fds }: { data: Buffer; fds: number[] },) {
-        fds.forEach((fd) => this.fdQ.push(fd));
-        try {
-          for (const [obj, method, args] of this.parser(data)) {
-            const functionActualName = snakePrepend("wl", method);
-            params.call?.bind(this)?.(obj, functionActualName, args);
+    if ("call" in this.params) {
+      // Handle data from the client
+      sock.on("readable", async function (this: Connection<V>) {
+        for await (const { data, fds } of parseOnReadable(sock)) {
+          this.emit("data", { data, fds });
+
+          // const fdQ = new FIFO<number>();
+          fds.forEach((fd) => this.fdQ.push(fd));
+          try {
+            for (const [obj, method, args] of this.parser(data, this.fdQ)) {
+              const functionActualName = snakePrepend("wl", method);
+              params.call?.bind(this)?.(obj, functionActualName, args);
+            }
+          } catch (err) {
+            console.error(err);
+            sock.end();
           }
-        } catch (err) {
-          console.error(err);
-          sock.end();
         }
       }.bind(this));
-    }.bind(this));
+    }
   }
 
   objects: Map<number, V> = new Map();
+  instances: Map<string, V[]> = new Map();
 
   createObjRef(args: Record<string, any>, iface: string, oid: number, parent?: V, version?: number) {
     return this.params.createObjRef.bind(this)(args, iface, oid, parent, version);
@@ -135,9 +141,12 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
     this.objects.set(objRef.oid, objRef);
     this.emit("new_obj", objRef);
 
+    const instances = this.instances.get(objRef.iface);
+    if (!instances) this.instances.set(objRef.iface, [objRef]);
+    else instances.push(objRef);
+
     return objRef;
   }
-
   parseBlock(ctx: ParsingContext<V>, type: string, arg?: WlArg): any {
     const idx = ctx.idx;
     switch (type) {
@@ -219,8 +228,8 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
 
   *parser(
     buf: Buffer,
-    isEvent?: boolean,
-  ): Generator<[V, string, Record<string, any>]> {
+    fdQ: FIFO<number>,
+  ): Generator<[V, string, Record<string, any>, [[number, number], number[]]]> {
     let newCommandAt = 0;
     while (newCommandAt < buf.length) {
       const objectId = read(buf, newCommandAt + 0);
@@ -239,10 +248,12 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
 
       const relevantIface = relevantObject.iface;
       const relevantScope =
-        interfaces[relevantIface][isEvent ? "events" : "requests"];
+        interfaces[relevantIface].requests;
       const { name: commandName, args: signature } = relevantScope[opcode];
 
       const argsResult: Record<string, any> = {};
+
+      const resultFdList: number[] = [];
 
       let currentIndex = newCommandAt + 8;
 
@@ -250,27 +261,83 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
         buf,
         idx: currentIndex,
         callbacks: [],
-        fdQ: this.fdQ,
+        fdQ,
         parent: relevantObject,
       };
 
       for (const arg of signature) {
-        argsResult[arg.name] = this.parseBlock(parsingContext, arg.type, arg);
+        const result = this.parseBlock(parsingContext, arg.type, arg);
+        argsResult[arg.name] = result;
+        if (arg.type === "fd") resultFdList.push(result);
       }
 
       for (const callback of parsingContext.callbacks) {
         callback(argsResult);
       }
 
-      yield [relevantObject, commandName, argsResult];
+      yield [relevantObject, commandName, argsResult, [[newCommandAt, newCommandAt + size], resultFdList]];
 
       newCommandAt += size;
     }
     if (newCommandAt !== buf.length) throw new Error("Possibly missing data");
 
     this.sendPending();
+  }
 
-    // return commands;
+  *reverseParser(
+    buf: Buffer,
+    fdQ: FIFO<number>,
+  ): Generator<[V, string, Record<string, any>, [[number, number], number[]]]> {
+    let newCommandAt = 0;
+    while (newCommandAt < buf.length) {
+      const objectId = read(buf, newCommandAt + 0);
+
+      const opcodeAndSize = read(buf, newCommandAt + 4);
+      const opcode = opcodeAndSize % 2 ** 16;
+      const size = opcodeAndSize >> 16;
+
+      const relevantObject = this.objects.get(objectId);
+      if (relevantObject == null)
+        throw new Error(
+          "Server tried to invoke an operation on an unknown object",
+        );
+
+      // console.log(relevantObject);
+
+      const relevantIface = relevantObject.iface;
+      const relevantScope =
+        interfaces[relevantIface].events;
+      const { name: commandName, args: signature } = relevantScope[opcode];
+
+      const argsResult: Record<string, any> = {};
+
+      const resultFdList: number[] = [];
+
+      let currentIndex = newCommandAt + 8;
+
+      const parsingContext: ParsingContext<V> = {
+        buf,
+        idx: currentIndex,
+        callbacks: [],
+        fdQ,
+        parent: relevantObject,
+      };
+
+      for (const arg of signature) {
+        const result = this.parseBlock(parsingContext, arg.type, arg);
+        argsResult[arg.name] = result;
+        if (arg.type === "fd") resultFdList.push(result);
+      }
+
+      for (const callback of parsingContext.callbacks) {
+        callback(argsResult);
+      }
+
+      yield [relevantObject, commandName, argsResult, [[newCommandAt, newCommandAt + size], resultFdList]];
+
+      newCommandAt += size;
+    }
+    if (newCommandAt !== buf.length) throw new Error("Possibly missing data");
   }
 
   buildBlock(val: any, arg: WlArg, idx: number, buf: Buffer, fds: number[]): number {
@@ -377,7 +444,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
     if (!Connection.isVersionAccurate(obj.iface, obj.version, eventName)) return false;
     const toBeSent = this.builder(obj, eventName, args);
 
-    // console.log(this.connId, "S --> C", Connection.prettyWlObj(obj), eventName);
+    // console.log(this.connId, "S --> C", obj.iface, obj.oid, eventName, JSON.stringify(args));
 
     this.buffersSoFar.push(toBeSent);
     // if (!this.immediate)
@@ -385,6 +452,10 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
     // Just checked and setImmediate can tAKE TWELVE MILLISECONDS?? im a dumbass
     // this.socket.write(toBeSent);
     return true;
+  }
+
+  write(...args: Parameters<USocket["write"]>) {
+    return this.socket.write(...args);
   }
 
   sendPending() {

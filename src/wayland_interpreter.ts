@@ -1,7 +1,7 @@
 import parse, { Node } from "xml-parser";
 // import fsp, { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { snakeToCamel } from "./utils.js";
+import { snakeToCamel } from "./utils";
 import { readdirSync, readFileSync } from "node:fs";
 
 const definitionsRoot = join(__dirname, "../definitions/");

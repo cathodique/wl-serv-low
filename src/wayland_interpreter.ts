@@ -27,6 +27,7 @@ export interface WlMessage {
   since: number | undefined;
   deprec: number | undefined;
   index: number;
+  type: string | undefined;
   args: WlArg[];
 }
 
@@ -115,6 +116,7 @@ for (const parsed of parsedArr) {
       since: v.attributes.since == undefined ? undefined :  Number(v.attributes.since),
       deprec: v.attributes['deprecated-since'] == undefined ? undefined : Number(v.attributes['deprecated-since']),
       args: childrenToArgs(v.children.filter((v) => v.name === "arg")),
+      type: v.attributes['type'],
     }));
     const events = byTag.event.map((v, i) => ({
       name: snakeToCamel(v.attributes.name),
@@ -122,6 +124,7 @@ for (const parsed of parsedArr) {
       since: v.attributes.since == undefined ? undefined :  Number(v.attributes.since),
       deprec: v.attributes['deprecated-since'] == undefined ? undefined : Number(v.attributes['deprecated-since']),
       args: childrenToArgs(v.children.filter((v) => v.name === "arg")),
+      type: v.attributes['type'],
     }));
 
     const currIface: WlInterface = {

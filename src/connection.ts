@@ -131,7 +131,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
   }
 
   objects: Map<number, V> = new Map();
-  instances: Map<string, V[]> = new Map();
+  instances: Map<string, Set<V>> = new Map();
 
   createObjRef(args: Record<string, any>, iface: string, oid: number, parent?: V, version?: number) {
     return this.params.createObjRef.bind(this)(args, iface, oid, parent, version);
@@ -142,87 +142,93 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
     this.emit("new_obj", objRef);
 
     const instances = this.instances.get(objRef.iface);
-    if (!instances) this.instances.set(objRef.iface, [objRef]);
-    else instances.push(objRef);
+    if (!instances) this.instances.set(objRef.iface, new Set([objRef]));
+    else instances.add(objRef);
 
     return objRef;
   }
   parseBlock(ctx: ParsingContext<V>, type: string, arg?: WlArg): any {
     const idx = ctx.idx;
-    switch (type) {
-      case "int": {
-        ctx.idx += 4;
-        return read(ctx.buf, idx, true);
-      }
-      case "uint": {
-        ctx.idx += 4;
-        return read(ctx.buf, idx);
-      }
-      case "fixed": {
-        ctx.idx += 4;
-        return read(ctx.buf, idx, true) / 2 ** 8;
-      }
-      case "object": {
-        if (!arg) throw new Error("Need whole arg to parse object");
-        const hypotheticalOID = read(ctx.buf, ctx.idx);
-        ctx.idx += 4;
-        if (hypotheticalOID === 0 && 'allowNull' in arg && arg.allowNull) {
-          return null;
-        }
-        // const object = this.objects.get(hypotheticalOID);
-        return this.objects.get(hypotheticalOID);
-      }
-      case "new_id": {
-        if (!arg) throw new Error("Need whole arg to parse new_id");
-        if (!("interface" in arg))
-          throw new Error("new_id has no interface attribute");
-        const iface = arg.interface;
-        if (iface != null) {
-          const oid = read(ctx.buf, ctx.idx);
 
+    try {
+      switch (type) {
+        case "int": {
           ctx.idx += 4;
-          ctx.callbacks.push(
-            (args: Record<string, any>) =>
-              (args[arg.name] = this.createObject(this.createObjRef(args, iface, oid, ctx.parent))),
-          );
-          return;
-        } else {
-          const ifaceName = this.parseBlock(ctx, "string") as string;
-          const ifaceVersion = this.parseBlock(ctx, "uint") as number;
-          const oid = this.parseBlock(ctx, "uint") as number;
-
-          const knownVersion = interfaces[ifaceName]?.version;
-          if (knownVersion < ifaceVersion) {
-            throw new Error(`Of ${ifaceName}: version ${ifaceVersion} is incompatible with version ${knownVersion}`);
-          }
-          ctx.callbacks.push((args: Record<string, any>) => {
-            args[arg.name] = this.createObject(this.createObjRef(args, ifaceName, oid, ctx.parent, ifaceVersion));
-          });
-          return null;
+          return read(ctx.buf, idx, true);
         }
-      }
-      case "string": {
-        const size = read(ctx.buf, idx);
-        ctx.idx += 4;
+        case "uint": {
+          ctx.idx += 4;
+          return read(ctx.buf, idx);
+        }
+        case "fixed": {
+          ctx.idx += 4;
+          return read(ctx.buf, idx, true) / 2 ** 8;
+        }
+        case "object": {
+          if (!arg) throw new Error("Need whole arg to parse object");
+          const hypotheticalOID = read(ctx.buf, ctx.idx);
+          ctx.idx += 4;
+          if (hypotheticalOID === 0 && 'allowNull' in arg && arg.allowNull) {
+            return null;
+          }
+          // const object = this.objects.get(hypotheticalOID);
+          return this.objects.get(hypotheticalOID);
+        }
+        case "new_id": {
+          if (!arg) throw new Error("Need whole arg to parse new_id");
+          if (!("interface" in arg))
+            throw new Error("new_id has no interface attribute");
+          const iface = arg.interface;
+          if (iface != null) {
+            const oid = read(ctx.buf, ctx.idx);
 
-        const string = ctx.buf.subarray(idx + 4, idx + size + 4 - 1); // -1 for the NUL at the end
-        ctx.idx += Math.ceil(size / 4) * 4;
-        return string.toString();
-      }
-      case "array": {
-        const size = read(ctx.buf, idx);
-        ctx.idx += 4;
+            ctx.idx += 4;
+            ctx.callbacks.push(
+              (args: Record<string, any>) =>
+                (args[arg.name] = this.createObject(this.createObjRef(args, iface, oid, ctx.parent))),
+            );
+            return;
+          } else {
+            const ifaceName = this.parseBlock(ctx, "string") as string;
+            const ifaceVersion = this.parseBlock(ctx, "uint") as number;
+            const oid = this.parseBlock(ctx, "uint") as number;
 
-        const buffer = ctx.buf.subarray(idx + 4, idx + size + 4);
-        ctx.idx += Math.ceil(size / 4) * 4;
+            const knownVersion = interfaces[ifaceName]?.version;
+            if (knownVersion < ifaceVersion) {
+              throw new Error(`Of ${ifaceName}: version ${ifaceVersion} is incompatible with version ${knownVersion}`);
+            }
+            ctx.callbacks.push((args: Record<string, any>) => {
+              args[arg.name] = this.createObject(this.createObjRef(args, ifaceName, oid, ctx.parent, ifaceVersion));
+            });
+            return null;
+          }
+        }
+        case "string": {
+          const size = read(ctx.buf, idx);
+          ctx.idx += 4;
 
-        return buffer;
+          const string = ctx.buf.subarray(idx + 4, idx + size + 4 - 1); // -1 for the NUL at the end
+          ctx.idx += Math.ceil(size / 4) * 4;
+          return string.toString();
+        }
+        case "array": {
+          const size = read(ctx.buf, idx);
+          ctx.idx += 4;
+
+          const buffer = ctx.buf.subarray(idx + 4, idx + size + 4);
+          ctx.idx += Math.ceil(size / 4) * 4;
+
+          return buffer;
+        }
+        case "fd": {
+          return ctx.fdQ.shift();
+        }
+        default:
+          throw new Error(`While parsing message: unknown type ${type}`);
       }
-      case "fd": {
-        return ctx.fdQ.shift();
-      }
-      default:
-        throw new Error(`While parsing message: unknown type ${type}`);
+    } catch (err) {
+      console.error(ctx, type, arg);
+      throw err;
     }
   }
 
@@ -469,7 +475,12 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
   }
 
   destroy(oid: number) {
+    const object = this.objects.get(oid);
+    if (!object) return;
+
+    this.instances.get(object.iface)!.delete(object);
     this.objects.delete(oid);
+
     const wlDisplay = this.objects.get(1);
     if (oid < 0xFF000000 && wlDisplay) {
       this.addCommand(wlDisplay, 'deleteId', { id: oid });

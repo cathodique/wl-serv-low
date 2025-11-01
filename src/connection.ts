@@ -15,8 +15,14 @@ interface ParsingContext<V> {
   buf: Buffer;
   idx: number;
   fdQ: FIFO<number>;
-  callbacks: ((args: Record<string, any>) => void)[];
   parent: V;
+}
+
+export interface NewObjectDescriptor {
+  oid: number;
+  type: string;
+  parent: ObjectReference<any>;
+  version?: number;
 }
 
 export const endianness = getEndianness();
@@ -54,7 +60,6 @@ export async function *parseOnReadable(
 }
 
 export interface ConnectionParams<V extends ObjectReference, U extends Connection<V>> {
-  createObjRef(this: U, args: Record<string, any>, ifaceName: string, newOid: number, parent?: V, version?: number): V;
   call?(this: U, object: V, fnName: string, args: Record<string, any>): void;
 }
 
@@ -133,10 +138,6 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
   objects: Map<number, V> = new Map();
   instances: Map<string, Set<V>> = new Map();
 
-  createObjRef(args: Record<string, any>, iface: string, oid: number, parent?: V, version?: number) {
-    return this.params.createObjRef.bind(this)(args, iface, oid, parent, version);
-  }
-
   createObject(objRef: V) {
     this.objects.set(objRef.oid, objRef);
     this.emit("new_obj", objRef);
@@ -183,11 +184,11 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
             const oid = read(ctx.buf, ctx.idx);
 
             ctx.idx += 4;
-            ctx.callbacks.push(
-              (args: Record<string, any>) =>
-                (args[arg.name] = this.createObject(this.createObjRef(args, iface, oid, ctx.parent))),
-            );
-            return;
+
+            return {
+              oid,
+              type: iface,
+            } as NewObjectDescriptor; // Type is going to get lost anyways...
           } else {
             const ifaceName = this.parseBlock(ctx, "string") as string;
             const ifaceVersion = this.parseBlock(ctx, "uint") as number;
@@ -197,10 +198,11 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
             if (knownVersion < ifaceVersion) {
               throw new Error(`Of ${ifaceName}: version ${ifaceVersion} is incompatible with version ${knownVersion}`);
             }
-            ctx.callbacks.push((args: Record<string, any>) => {
-              args[arg.name] = this.createObject(this.createObjRef(args, ifaceName, oid, ctx.parent, ifaceVersion));
-            });
-            return null;
+            return {
+              oid,
+              type: ifaceName,
+              version: ifaceVersion,
+            } as NewObjectDescriptor;
           }
         }
         case "string": {
@@ -266,7 +268,6 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
       const parsingContext: ParsingContext<V> = {
         buf,
         idx: currentIndex,
-        callbacks: [],
         fdQ,
         parent: relevantObject,
       };
@@ -275,10 +276,6 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
         const result = this.parseBlock(parsingContext, arg.type, arg);
         argsResult[arg.name] = result;
         if (arg.type === "fd") resultFdList.push(result);
-      }
-
-      for (const callback of parsingContext.callbacks) {
-        callback(argsResult);
       }
 
       yield [relevantObject, commandName, argsResult, [[newCommandAt, newCommandAt + size], resultFdList]];
@@ -324,7 +321,6 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
       const parsingContext: ParsingContext<V> = {
         buf,
         idx: currentIndex,
-        callbacks: [],
         fdQ,
         parent: relevantObject,
       };
@@ -333,10 +329,6 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
         const result = this.parseBlock(parsingContext, arg.type, arg);
         argsResult[arg.name] = result;
         if (arg.type === "fd") resultFdList.push(result);
-      }
-
-      for (const callback of parsingContext.callbacks) {
-        callback(argsResult);
       }
 
       yield [relevantObject, commandName, argsResult, [[newCommandAt, newCommandAt + size], resultFdList]];
@@ -420,11 +412,8 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
       const arg = msg.args[i];
       const key = snakeToCamel(arg.name);
       if (!Object.hasOwn(args, key)) throw new Error(`Whilst sending ${obj.iface}.${eventName}, ${key} was not found in args`);
-      // console.log(args, key);
       currIdx = this.buildBlock(args[key], arg, currIdx, result, resultFds);
     }
-
-    // console.log(size * 2 ** 16 + opcode, result);
 
     return [result, resultFds];
   }

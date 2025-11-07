@@ -188,6 +188,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
             return {
               oid,
               type: iface,
+              parent: ctx.parent,
             } as NewObjectDescriptor; // Type is going to get lost anyways...
           } else {
             const ifaceName = this.parseBlock(ctx, "string") as string;
@@ -202,6 +203,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
               oid,
               type: ifaceName,
               version: ifaceVersion,
+              parent: ctx.parent,
             } as NewObjectDescriptor;
           }
         }

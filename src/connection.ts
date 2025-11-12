@@ -371,7 +371,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
         const size = val.length as number;
         const buffer: Buffer = val;
         write(size, buf, idx);
-        buffer.copy(buf, idx + 1);
+        buffer.copy(buf, idx + 4);
 
         return idx + 4 + Math.ceil(size / 4) * 4;
       }

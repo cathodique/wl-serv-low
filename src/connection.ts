@@ -22,6 +22,7 @@ export interface NewObjectDescriptor {
   oid: number;
   type: string;
   parent: ObjectReference<any>;
+  connection: Connection<any>;
   version?: number;
 }
 
@@ -189,6 +190,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
               oid,
               type: iface,
               parent: ctx.parent,
+              connection: this,
             } as NewObjectDescriptor; // Type is going to get lost anyways...
           } else {
             const ifaceName = this.parseBlock(ctx, "string") as string;
@@ -204,6 +206,7 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
               type: ifaceName,
               version: ifaceVersion,
               parent: ctx.parent,
+              connection: this,
             } as NewObjectDescriptor;
           }
         }
@@ -356,7 +359,15 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
       }
       case "new_id": // EDIT: Yes, yes it is. Cf. WlDataDevice#wlDataOffer
       case "object": {
-        write(arg.allowNull ? val?.oid ?? 0 : val.oid, buf, idx);
+        let oid = 0;
+        if (val) {
+          if (!("connection" in val)) throw new Error("Tried to build object not belonging to any connection");
+          if (val.connection !== this) throw new Error("Tried to build object not belonging to this connection");
+          oid = val.oid;
+        } else if (!arg.allowNull) {
+          throw new Error("Tried to omit required object");
+        }
+        write(oid, buf, idx);
         return idx + 4;
       }
       case "string": {

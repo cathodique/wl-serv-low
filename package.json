@@ -3,7 +3,6 @@
   "version": "2.0.0",
   "description": "Low level wayland server",
   "main": "dist/index.js",
-  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -28,8 +27,9 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@cathodique/usocket": "^1.0.7",
+    "@cathodique/usocket2": "file:../usocket2",
     "fast-fifo": "^1.3.2",
+    "informa": "^3.0.0",
     "xml-parser": "^1.2.1"
   }
 }

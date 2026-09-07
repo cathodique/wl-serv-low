@@ -2,7 +2,7 @@ import { endianness as getEndianness } from "node:os";
 import type { Compositor } from "./compositor.js";
 // import { interfaces, WlArg, WlMessage } from "./wayland_interpreter.js";
 
-import { USocket } from "@cathodique/usocket";
+import { USocket } from "@cathodique/usocket2";
 
 import FIFO from "fast-fifo";
 import { snakePrepend, snakeToCamel } from "./utils.js";
@@ -113,6 +113,10 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
     this.params = params;
 
     this.fdQ = new FIFO();
+
+    sock.on("error", (err) => {
+      console.error(`Socket error on conn #${connId}:`, err);
+    });
 
     if ("call" in this.params) {
       // Handle data from the client
@@ -402,7 +406,8 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
         continue;
       }
       if (arg.type === "fd") continue;
-      result += Math.ceil((args[arg.name].length + 1) / 4) * 4 + 4;
+      const extra = arg.type === "string" ? 1 : 0;
+      result += Math.ceil((args[arg.name].length + extra) / 4) * 4 + 4;
     }
 
     return result;
@@ -467,13 +472,15 @@ export class Connection<V extends ObjectReference> extends EventEmitter {
   }
 
   sendPending() {
+    if (this.buffersSoFar.length === 0) return;
     const resBuf = Buffer.concat(this.buffersSoFar.map(([v]) => v));
-    this.socket.write({ data: resBuf, fds: this.buffersSoFar.map(([_, v]) => v).flat(1) });
-    // console.log("S2C", resBuf.toString("hex"));
-
-    // console.log('flushed', this.buffersSoFar.length, 'buffers');
-
+    const fds = this.buffersSoFar.map(([_, v]) => v).flat(1);
     this.buffersSoFar = [];
+    try {
+      this.socket.write({ data: resBuf, fds });
+    } catch (err) {
+      console.error(`Failed to sendPending on conn #${this.connId}:`, err);
+    }
   }
 
   destroy(oid: number) {

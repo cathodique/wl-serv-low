@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import fsp from "node:fs/promises";
 import { Connection, ObjectReference } from "./connection.js";
-import { UServer, USocket } from "@cathodique/usocket";
+import { UServer, USocket } from "@cathodique/usocket2";
 import { EventEmitter } from "node:stream";
 
 interface CompositorParams<V extends ObjectReference, U extends Connection<V>, T extends Compositor<V, U>> {
